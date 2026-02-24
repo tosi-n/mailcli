@@ -37,7 +37,7 @@ class MailConnection(Base):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)  # gmail|outlook|ses_forwarding
     token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     connected_email: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, default=dict)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC))
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC), onupdate=lambda: dt.datetime.now(dt.UTC))
 
@@ -70,4 +70,3 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
     Session = get_sessionmaker()
     async with Session() as session:
         yield session
-

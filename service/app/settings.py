@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Internal auth
-    MAILCLI_INTERNAL_API_KEY: str
+    MAILCLI_INTERNAL_API_KEY: str = ""
 
     # Token encryption (Fernet base64 key; 32 bytes)
     MAILCLI_TOKEN_ENCRYPTION_KEY: str
@@ -46,4 +46,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-

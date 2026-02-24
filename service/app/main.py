@@ -178,7 +178,7 @@ async def _upsert_connection(
     now = dt.datetime.now(dt.UTC)
     existing = await _load_connection(db, business_profile_id, provider)
     if existing:
-        meta = dict(existing.metadata or {})
+        meta = dict(existing.metadata_json or {})
         if metadata_patch:
             meta.update(metadata_patch)
         await db.execute(
@@ -188,7 +188,7 @@ async def _upsert_connection(
                 user_id=str(user_id),
                 token_encrypted=enc,
                 connected_email=connected_email or existing.connected_email,
-                metadata=meta,
+                metadata_json=meta,
                 updated_at=now,
             )
         )
@@ -202,7 +202,7 @@ async def _upsert_connection(
         provider=provider,
         token_encrypted=enc,
         connected_email=connected_email,
-        metadata=metadata_patch or {},
+        metadata_json=metadata_patch or {},
         created_at=now,
         updated_at=now,
     )
@@ -241,9 +241,12 @@ async def _backend_upload_file(
         form["metadata_json"] = json.dumps(metadata)
 
     async with httpx.AsyncClient(timeout=120.0) as client:
+        headers: dict[str, str] = {}
+        if settings.MAILCLI_INTERNAL_API_KEY:
+            headers["X-Internal-API-Key"] = settings.MAILCLI_INTERNAL_API_KEY
         resp = await client.post(
             settings.BACKEND_INTERNAL_UPLOAD_URL,
-            headers={"X-Internal-API-Key": settings.MAILCLI_INTERNAL_API_KEY},
+            headers=headers,
             data=form,
             files=files,
         )
@@ -430,7 +433,7 @@ async def webhook_gmail(request: Request) -> dict[str, Any]:
         token = _cipher().decrypt_json(conn.token_encrypted)
         token = await _maybe_refresh_token("gmail", token)
 
-        prev_history = (conn.metadata or {}).get("gmail_history_id")
+        prev_history = (conn.metadata_json or {}).get("gmail_history_id")
         if not prev_history:
             await _upsert_connection(
                 db,
