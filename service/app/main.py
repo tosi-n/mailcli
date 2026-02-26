@@ -115,7 +115,14 @@ async def _consume_oauth_state(db: AsyncSession, provider: str, state: str) -> d
     row = res.scalars().first()
     if not row:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
-    if row.expires_at < dt.datetime.now(dt.UTC):
+    expires_at = row.expires_at
+    now_utc = dt.datetime.now(dt.UTC)
+    # SQLite returns naive datetimes by default; compare using matching tz-awareness.
+    if isinstance(expires_at, dt.datetime) and expires_at.tzinfo is None:
+        now_ref = now_utc.replace(tzinfo=None)
+    else:
+        now_ref = now_utc
+    if expires_at < now_ref:
         await db.execute(delete(OAuthState).where(OAuthState.state == state))
         await db.commit()
         raise HTTPException(status_code=400, detail="Expired OAuth state")
@@ -137,6 +144,26 @@ def _parse_callback_url(callback_url: str) -> dict[str, str]:
     if realm_id:
         out["realmId"] = str(realm_id)
     return out
+
+
+def _provider_http_error_detail(exc: httpx.HTTPStatusError, provider: str) -> str:
+    status = exc.response.status_code if exc.response is not None else 0
+    detail: str | None = None
+    try:
+        payload = exc.response.json() if exc.response is not None else {}
+        if isinstance(payload, dict):
+            detail = payload.get("error_description") or payload.get("error")
+            if detail and payload.get("error_description") and payload.get("error"):
+                detail = f"{payload.get('error')}: {payload.get('error_description')}"
+    except Exception:
+        detail = None
+    if not detail and exc.response is not None:
+        body = (exc.response.text or "").strip()
+        if body:
+            detail = body[:512]
+    if not detail:
+        detail = f"HTTP {status}"
+    return f"{provider} OAuth exchange failed: {detail}"
 
 
 async def _maybe_refresh_token(provider: str, token: dict[str, Any]) -> dict[str, Any]:
@@ -301,7 +328,10 @@ async def gmail_exchange(body: ExchangeIn) -> dict[str, Any]:
         bp_id = UUID(state_payload["business_profile_id"])
         user_id = UUID(state_payload["user_id"])
 
-        token = await exchange_gmail_code(bits["code"])
+        try:
+            token = await exchange_gmail_code(bits["code"])
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=400, detail=_provider_http_error_detail(exc, "gmail")) from exc
 
         # Capture connected email and initialize history id.
         email_profile = await gmail_api_get("/gmail/v1/users/me/profile", token)
@@ -343,7 +373,10 @@ async def outlook_exchange(body: ExchangeIn) -> dict[str, Any]:
         bp_id = UUID(state_payload["business_profile_id"])
         user_id = UUID(state_payload["user_id"])
 
-        token = await exchange_outlook_code(bits["code"])
+        try:
+            token = await exchange_outlook_code(bits["code"])
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=400, detail=_provider_http_error_detail(exc, "outlook")) from exc
         me = await outlook_api_get("/v1.0/me", token)
         connected_email = me.get("mail") or me.get("userPrincipalName")
 

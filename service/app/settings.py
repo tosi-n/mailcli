@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
+from typing import Any
+
+import boto3
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -44,5 +51,84 @@ class Settings(BaseSettings):
     EMAIL_FORWARD_PREFIX: str = "documents"
     EMAIL_FORWARD_DOMAIN: str = ""
 
+    # Optional direct AWS Secrets Manager hydration for local/dev runtime.
+    MAILCLI_USE_AWS_SECRETS_MANAGER: bool = False
+    MAILCLI_AWS_SECRETS_MANAGER_SECRET_IDS: str = ""
+    AWS_SECRETS_MANAGER_SECRET_IDS: str = ""
+    AWS_REGION: str = "eu-west-2"
 
-settings = Settings()
+
+def _parse_secret_string(secret_string: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    try:
+        raw = json.loads(secret_string)
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if key:
+                    parsed[str(key)] = "" if value is None else str(value)
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    for line in secret_string.splitlines():
+        item = line.strip()
+        if not item or item.startswith("#") or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        parsed[key.strip()] = value.strip().strip("\"'")
+    return parsed
+
+
+def _secret_ids(cfg: Settings) -> list[str]:
+    raw = cfg.MAILCLI_AWS_SECRETS_MANAGER_SECRET_IDS or cfg.AWS_SECRETS_MANAGER_SECRET_IDS
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _hydrate_from_aws(cfg: Settings) -> Settings:
+    if not cfg.MAILCLI_USE_AWS_SECRETS_MANAGER:
+        return cfg
+    ids = _secret_ids(cfg)
+    if not ids:
+        logger.warning("MAILCLI_USE_AWS_SECRETS_MANAGER=true but no secret ids configured")
+        return cfg
+
+    client = boto3.client("secretsmanager", region_name=cfg.AWS_REGION)
+    merged: dict[str, str] = {}
+    for secret_id in ids:
+        try:
+            resp = client.get_secret_value(SecretId=secret_id)
+        except Exception as exc:  # pragma: no cover - network/credentials dependent
+            logger.warning("Unable to read AWS secret %s: %s", secret_id, exc)
+            continue
+        payload = resp.get("SecretString")
+        if not payload:
+            continue
+        merged.update(_parse_secret_string(str(payload)))
+
+    if not merged:
+        logger.warning("No values loaded from AWS Secrets Manager for mailcli")
+        return cfg
+
+    overrides: dict[str, Any] = {}
+    for field_name in cfg.model_fields:
+        if field_name in {
+            "MAILCLI_USE_AWS_SECRETS_MANAGER",
+            "MAILCLI_AWS_SECRETS_MANAGER_SECRET_IDS",
+            "AWS_SECRETS_MANAGER_SECRET_IDS",
+            "AWS_REGION",
+        }:
+            continue
+        current = getattr(cfg, field_name)
+        if isinstance(current, str) and current:
+            continue
+        from_secret = merged.get(field_name)
+        if from_secret not in (None, ""):
+            overrides[field_name] = from_secret
+
+    if overrides:
+        logger.info("Applied %d mailcli settings from AWS Secrets Manager", len(overrides))
+        return cfg.model_copy(update=overrides)
+    return cfg
+
+
+settings = _hydrate_from_aws(Settings())

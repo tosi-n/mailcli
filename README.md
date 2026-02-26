@@ -7,8 +7,7 @@ Scope (v1):
 - Outlook OAuth + best-effort Microsoft Graph subscriptions (notification + lifecycle)
 - AWS SES -> S3 -> SNS email forwarding ingestion
 
-This repo **copies** upstream behavior from `jack-2` into `vendor/jack2/...` as the
-source-of-truth reference. We do not move or delete anything from `jack-2`.
+This service is self-contained and focused on internal mail ingestion workflows.
 
 ## Run (local)
 
@@ -46,13 +45,13 @@ Minimum:
 - `BACKEND_INTERNAL_UPLOAD_URL` (e.g. `http://backend:8000/api/v1/internal/media/upload`)
 - `BACKEND_PUBLIC_ORIGIN` (public URL used for OAuth redirect URIs)
 
-Gmail (from `jack-2/env.example`):
+Gmail:
 - `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`
 - `GMAIL_SCOPE`
 - `GMAIL_AUTHORIZATION_URL`, `GMAIL_TOKEN_URL`, `GMAIL_BASE_URL`
 - `GMAIL_SUBSCRIPTION_TOPIC`
 
-Outlook (from `jack-2/env.example`):
+Outlook:
 - `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`
 - `MICROSOFT_SCOPE`
 - `MICROSOFT_AUTHORIZATION_URL`, `MICROSOFT_TOKEN_URL`, `MICROSOFT_BASE_URL`
