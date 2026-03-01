@@ -35,11 +35,13 @@ docker run --rm --env-file .env mailcli-worker:dev
 - `POST /internal/webhooks/outlook-lifecycle`
 - `POST /internal/webhooks/email-forwarding-ses`
 
-All internal endpoints require `X-Internal-API-Key: $MAILCLI_INTERNAL_API_KEY`.
+Internal API key mode:
+- If `MAILCLI_INTERNAL_API_KEY` is set, callers must send `X-Internal-API-Key`.
+- If `MAILCLI_INTERNAL_API_KEY` is empty, internal key enforcement is disabled.
 
 ## Required env
 Minimum:
-- `MAILCLI_INTERNAL_API_KEY`
+- `MAILCLI_INTERNAL_API_KEY` (optional; leave empty to disable internal header enforcement)
 - `MAILCLI_TOKEN_ENCRYPTION_KEY` (Fernet key; base64 32 bytes)
 - `MAILCLI_DATABASE_URL` (optional; defaults to `sqlite+aiosqlite:////data/mailcli.db`)
 - `BACKEND_INTERNAL_UPLOAD_URL` (e.g. `http://backend:8000/api/v1/internal/media/upload`)

@@ -271,13 +271,28 @@ async def _backend_upload_file(
         headers: dict[str, str] = {}
         if settings.MAILCLI_INTERNAL_API_KEY:
             headers["X-Internal-API-Key"] = settings.MAILCLI_INTERNAL_API_KEY
-        resp = await client.post(
-            settings.BACKEND_INTERNAL_UPLOAD_URL,
-            headers=headers,
-            data=form,
-            files=files,
-        )
-        resp.raise_for_status()
+        try:
+            resp = await client.post(
+                settings.BACKEND_INTERNAL_UPLOAD_URL,
+                headers=headers,
+                data=form,
+                files=files,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 502
+            message = f"Backend media upload failed (status {status})"
+            if exc.response is not None:
+                try:
+                    payload = exc.response.json()
+                    detail = payload.get("detail") if isinstance(payload, dict) else None
+                    if isinstance(detail, str) and detail.strip():
+                        message = f"{message}: {detail.strip()}"
+                except Exception:
+                    body = (exc.response.text or "").strip()
+                    if body:
+                        message = f"{message}: {body[:256]}"
+            raise HTTPException(status_code=502, detail=message) from exc
         out = resp.json()
         url = out.get("url")
         if not url:
