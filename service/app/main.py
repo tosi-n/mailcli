@@ -14,6 +14,7 @@ from uuid import UUID
 
 import boto3
 import httpx
+from cryptography.fernet import InvalidToken
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, select, update
@@ -86,6 +87,16 @@ class MailSearchIn(BaseModel):
 
 def _cipher() -> TokenCipher:
     return TokenCipher(settings.MAILCLI_TOKEN_ENCRYPTION_KEY)
+
+
+def _decrypt_connection_token(token_encrypted: str, provider: str) -> dict[str, Any]:
+    try:
+        return _cipher().decrypt_json(token_encrypted)
+    except InvalidToken as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{provider} connection token is invalid for current encryption key; reconnect required",
+        ) from exc
 
 
 def _token_expires_at(token: dict[str, Any]) -> int:
@@ -478,7 +489,7 @@ async def webhook_gmail(request: Request) -> dict[str, Any]:
         if not conn:
             return {"processed": 0, "reason": "no_connection_for_email"}
 
-        token = _cipher().decrypt_json(conn.token_encrypted)
+        token = _decrypt_connection_token(conn.token_encrypted, "gmail")
         token = await _maybe_refresh_token("gmail", token)
 
         prev_history = (conn.metadata_json or {}).get("gmail_history_id")
@@ -593,7 +604,7 @@ async def webhook_outlook(
         if not conn:
             return {"processed": 0, "reason": "no_connection"}
 
-        token = _cipher().decrypt_json(conn.token_encrypted)
+        token = _decrypt_connection_token(conn.token_encrypted, "outlook")
         token = await _maybe_refresh_token("outlook", token)
 
         notifications = payload.get("value") or []
@@ -826,7 +837,7 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
                 "matches": [],
             }
 
-        token = _cipher().decrypt_json(conn.token_encrypted)
+        token = _decrypt_connection_token(conn.token_encrypted, provider)
         token = await _maybe_refresh_token(provider, token)
 
         matches: list[dict[str, Any]] = []
