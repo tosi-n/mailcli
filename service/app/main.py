@@ -840,7 +840,7 @@ def _message_matches_query(subject: str, snippet: str, query: str | None) -> boo
 
 def _is_valid_email(value: str) -> bool:
     raw = str(value or "").strip()
-    return bool(raw) and bool(re.match(r"^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", raw))
+    return bool(raw) and bool(re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", raw))
 
 
 def _build_gmail_raw_message(
