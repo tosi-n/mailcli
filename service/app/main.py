@@ -5,9 +5,11 @@ import datetime as dt
 import email
 import json
 import os
+import re
 import time
 import urllib.parse
 from email.header import decode_header
+from email.message import EmailMessage
 from email.utils import getaddresses
 from typing import Any
 from uuid import UUID
@@ -83,6 +85,22 @@ class MailSearchIn(BaseModel):
     from_ts: int | None = None
     to_ts: int | None = None
     max_results: int = 10
+
+
+class MailSendIn(BaseModel):
+    business_profile_id: UUID
+    to_email: str
+    subject: str = "Stimulir notification"
+    text: str | None = None
+    html: str | None = None
+    provider: str = "auto"  # auto|gmail|outlook
+    reply_to: str | None = None
+
+
+class MailSendOut(BaseModel):
+    provider: str
+    status: str
+    provider_message_id: str | None = None
 
 
 def _cipher() -> TokenCipher:
@@ -818,6 +836,180 @@ def _message_matches_query(subject: str, snippet: str, query: str | None) -> boo
     if not tokens:
         return True
     return any(token in hay for token in tokens)
+
+
+def _is_valid_email(value: str) -> bool:
+    raw = str(value or "").strip()
+    return bool(raw) and bool(re.match(r"^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", raw))
+
+
+def _build_gmail_raw_message(
+    *,
+    from_email: str | None,
+    to_email: str,
+    subject: str,
+    text: str | None,
+    html_body: str | None,
+    reply_to: str | None,
+) -> str:
+    msg = EmailMessage()
+    if from_email:
+        msg["From"] = from_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    if reply_to:
+        msg["Reply-To"] = reply_to
+
+    plain = (text or "").strip()
+    rich = (html_body or "").strip()
+    if rich and plain:
+        msg.set_content(plain)
+        msg.add_alternative(rich, subtype="html")
+    elif rich:
+        msg.set_content("This email contains HTML content.")
+        msg.add_alternative(rich, subtype="html")
+    else:
+        msg.set_content(plain or "No content")
+
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8").rstrip("=")
+
+
+def _provider_api_error_detail(exc: httpx.HTTPStatusError, provider: str, operation: str) -> str:
+    status = exc.response.status_code if exc.response is not None else 0
+    detail: str | None = None
+    try:
+        payload = exc.response.json() if exc.response is not None else {}
+        if isinstance(payload, dict):
+            detail = payload.get("error_description") or payload.get("error")
+            if not detail:
+                msg = payload.get("message")
+                detail = msg if isinstance(msg, str) else None
+    except Exception:
+        detail = None
+    if not detail and exc.response is not None:
+        body = (exc.response.text or "").strip()
+        if body:
+            detail = body[:512]
+    if not detail:
+        detail = f"HTTP {status}"
+    return f"{provider} {operation} failed: {detail}"
+
+
+async def _send_with_gmail(
+    *,
+    token: dict[str, Any],
+    from_email: str | None,
+    to_email: str,
+    subject: str,
+    text: str | None,
+    html_body: str | None,
+    reply_to: str | None,
+) -> dict[str, Any]:
+    raw = _build_gmail_raw_message(
+        from_email=from_email,
+        to_email=to_email,
+        subject=subject,
+        text=text,
+        html_body=html_body,
+        reply_to=reply_to,
+    )
+    return await gmail_api_post("/gmail/v1/users/me/messages/send", token, {"raw": raw})
+
+
+async def _send_with_outlook(
+    *,
+    token: dict[str, Any],
+    to_email: str,
+    subject: str,
+    text: str | None,
+    html_body: str | None,
+) -> dict[str, Any]:
+    body_content = (html_body or "").strip() or (text or "").strip() or "No content"
+    content_type = "HTML" if (html_body or "").strip() else "Text"
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {
+                "contentType": content_type,
+                "content": body_content,
+            },
+            "toRecipients": [{"emailAddress": {"address": to_email}}],
+        },
+        "saveToSentItems": True,
+    }
+    return await outlook_api_post("/v1.0/me/sendMail", token, payload)
+
+
+@app.post("/internal/mail/send", dependencies=[Depends(require_internal_api_key)], response_model=MailSendOut)
+async def mail_send(body: MailSendIn) -> MailSendOut:
+    provider_pref = (body.provider or "auto").strip().lower()
+    if provider_pref not in {"auto", "gmail", "outlook"}:
+        raise HTTPException(status_code=400, detail="provider must be auto|gmail|outlook")
+    if not _is_valid_email(body.to_email):
+        raise HTTPException(status_code=400, detail="Invalid recipient email")
+    if body.reply_to and not _is_valid_email(body.reply_to):
+        raise HTTPException(status_code=400, detail="Invalid reply_to email")
+
+    subject = (body.subject or "").strip()[:240] or "Stimulir notification"
+    ordered_providers = [provider_pref] if provider_pref != "auto" else ["gmail", "outlook"]
+
+    async for db in session_scope():
+        had_connection = False
+        last_error: str | None = None
+
+        for provider in ordered_providers:
+            conn = await _load_connection(db, body.business_profile_id, provider)
+            if not conn:
+                continue
+            had_connection = True
+
+            token = _decrypt_connection_token(conn.token_encrypted, provider)
+            token = await _maybe_refresh_token(provider, token)
+
+            try:
+                if provider == "gmail":
+                    sent = await _send_with_gmail(
+                        token=token,
+                        from_email=conn.connected_email,
+                        to_email=body.to_email.strip(),
+                        subject=subject,
+                        text=body.text,
+                        html_body=body.html,
+                        reply_to=body.reply_to,
+                    )
+                    provider_message_id = str(
+                        sent.get("id") or sent.get("threadId") or sent.get("messageId") or ""
+                    ) or None
+                else:
+                    sent = await _send_with_outlook(
+                        token=token,
+                        to_email=body.to_email.strip(),
+                        subject=subject,
+                        text=body.text,
+                        html_body=body.html,
+                    )
+                    provider_message_id = str(
+                        sent.get("id") or sent.get("messageId") or sent.get("internetMessageId") or ""
+                    ) or None
+            except httpx.HTTPStatusError as exc:
+                last_error = _provider_api_error_detail(exc, provider, "send")
+                if provider_pref != "auto":
+                    raise HTTPException(status_code=502, detail=last_error) from exc
+                continue
+
+            await _upsert_connection(
+                db,
+                business_profile_id=body.business_profile_id,
+                user_id=UUID(conn.user_id),
+                provider=provider,
+                token=token,
+                connected_email=conn.connected_email,
+            )
+            return MailSendOut(provider=provider, status="sent", provider_message_id=provider_message_id)
+
+        if not had_connection:
+            raise HTTPException(status_code=404, detail="No connected mail provider for business profile")
+        raise HTTPException(status_code=502, detail=last_error or "Unable to send email")
 
 
 @app.post("/internal/mail/search", dependencies=[Depends(require_internal_api_key)])

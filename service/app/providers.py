@@ -160,7 +160,12 @@ async def outlook_api_post(path: str, token: dict[str, Any], json_body: dict[str
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(url, headers={"Authorization": f"Bearer {token['access_token']}"}, json=json_body)
         resp.raise_for_status()
-        return resp.json()
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except Exception:
+            return {}
 
 
 def decode_pubsub_gmail_data(data_b64: str) -> dict[str, Any]:
@@ -191,4 +196,3 @@ def is_supported_attachment(mime_type: str, filename: str) -> bool:
     if mime_type == "application/octet-stream" and not (filename or "").lower().endswith(".pdf"):
         return False
     return True
-

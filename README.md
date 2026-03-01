@@ -34,6 +34,8 @@ docker run --rm --env-file .env mailcli-worker:dev
 - `POST /internal/webhooks/outlook`
 - `POST /internal/webhooks/outlook-lifecycle`
 - `POST /internal/webhooks/email-forwarding-ses`
+- `POST /internal/mail/search`
+- `POST /internal/mail/send`
 
 Internal API key mode:
 - If `MAILCLI_INTERNAL_API_KEY` is set, callers must send `X-Internal-API-Key`.
@@ -49,7 +51,7 @@ Minimum:
 
 Gmail:
 - `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`
-- `GMAIL_SCOPE`
+- `GMAIL_SCOPE` (must include send scope for outbound mail, e.g. `gmail.readonly gmail.send`)
 - `GMAIL_AUTHORIZATION_URL`, `GMAIL_TOKEN_URL`, `GMAIL_BASE_URL`
 - `GMAIL_SUBSCRIPTION_TOPIC`
 

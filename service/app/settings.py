@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     # Gmail OAuth + API
     GMAIL_CLIENT_ID: str = ""
     GMAIL_CLIENT_SECRET: str = ""
-    GMAIL_SCOPE: str = "https://www.googleapis.com/auth/gmail.readonly"
+    GMAIL_SCOPE: str = (
+        "https://www.googleapis.com/auth/gmail.readonly "
+        "https://www.googleapis.com/auth/gmail.send"
+    )
     GMAIL_AUTHORIZATION_URL: str = "https://accounts.google.com/o/oauth2/v2/auth"
     GMAIL_TOKEN_URL: str = "https://oauth2.googleapis.com/token"
     GMAIL_BASE_URL: str = "https://gmail.googleapis.com"
