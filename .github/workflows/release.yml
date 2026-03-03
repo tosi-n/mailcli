@@ -38,7 +38,7 @@ jobs:
           context: .
           file: service/Dockerfile
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.image }}:latest
@@ -51,7 +51,7 @@ jobs:
           context: .
           file: worker/Dockerfile
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}-worker
             ${{ steps.meta.outputs.image }}:latest-worker
