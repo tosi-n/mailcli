@@ -18,7 +18,10 @@ class Settings(BaseSettings):
     MAILCLI_TOKEN_ENCRYPTION_KEY: str
 
     # DB
-    MAILCLI_DATABASE_URL: str = "sqlite+aiosqlite:////data/mailcli.db"
+    # MAILCLI_DATABASE_URL takes priority. If empty, we fall back to DATABASE_URL
+    # so mailcli can share the same Postgres as the backend.
+    MAILCLI_DATABASE_URL: str = ""
+    DATABASE_URL: str = ""
 
     # Stimulir backend
     BACKEND_INTERNAL_UPLOAD_URL: str = "http://backend:8000/api/v1/internal/media/upload"
@@ -134,4 +137,13 @@ def _hydrate_from_aws(cfg: Settings) -> Settings:
     return cfg
 
 
-settings = _hydrate_from_aws(Settings())
+def _apply_database_url_fallback(cfg: Settings) -> Settings:
+    if cfg.MAILCLI_DATABASE_URL:
+        return cfg
+    if cfg.DATABASE_URL:
+        logger.info("Defaulting MAILCLI_DATABASE_URL from DATABASE_URL")
+        return cfg.model_copy(update={"MAILCLI_DATABASE_URL": cfg.DATABASE_URL})
+    return cfg.model_copy(update={"MAILCLI_DATABASE_URL": "sqlite+aiosqlite:////data/mailcli.db"})
+
+
+settings = _apply_database_url_fallback(_hydrate_from_aws(Settings()))
