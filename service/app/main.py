@@ -4,6 +4,7 @@ import base64
 import datetime as dt
 import email
 import json
+import logging
 import os
 import re
 import time
@@ -45,6 +46,7 @@ from app.settings import settings
 
 
 app = FastAPI(title="mailcli", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
@@ -322,6 +324,9 @@ async def _backend_upload_file(
                     if body:
                         message = f"{message}: {body[:256]}"
             raise HTTPException(status_code=502, detail=message) from exc
+        except httpx.RequestError as exc:
+            message = f"Backend media upload failed: {exc}"
+            raise HTTPException(status_code=502, detail=message) from exc
         out = resp.json()
         url = out.get("url")
         if not url:
@@ -332,6 +337,32 @@ async def _backend_upload_file(
             "bucket": out.get("bucket"),
             "key": out.get("key"),
         }
+
+
+def _attachment_upload_error(
+    *,
+    provider: str,
+    provider_message_id: str,
+    filename: str,
+    content_type: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    if isinstance(exc, HTTPException):
+        detail = str(exc.detail or "attachment upload failed")
+    else:
+        detail = str(exc) or exc.__class__.__name__
+    logger.warning(
+        "mail_search attachment upload failed provider=%s message_id=%s filename=%s detail=%s",
+        provider,
+        provider_message_id,
+        filename,
+        detail,
+    )
+    return {
+        "filename": filename,
+        "content_type": content_type,
+        "error": detail,
+    }
 
 
 @app.post("/internal/oauth/gmail/authorize-url", dependencies=[Depends(require_internal_api_key)])
@@ -1064,6 +1095,7 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
                     continue
 
                 attachments: list[dict[str, Any]] = []
+                attachment_upload_errors: list[dict[str, Any]] = []
                 for part in iter_gmail_parts(payload):
                     filename = part.get("filename") or ""
                     if not filename:
@@ -1084,14 +1116,26 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
                     if not data:
                         continue
                     blob = base64.urlsafe_b64decode(str(data).encode("utf-8"))
-                    upload = await _backend_upload_file(
-                        business_profile_id=body.business_profile_id,
-                        provider="gmail",
-                        filename=str(filename),
-                        content_type=str(mime_type),
-                        data=blob,
-                        metadata={"message_id": str(mid), "subject": subject, "search_query": body.query or ""},
-                    )
+                    try:
+                        upload = await _backend_upload_file(
+                            business_profile_id=body.business_profile_id,
+                            provider="gmail",
+                            filename=str(filename),
+                            content_type=str(mime_type),
+                            data=blob,
+                            metadata={"message_id": str(mid), "subject": subject, "search_query": body.query or ""},
+                        )
+                    except Exception as exc:
+                        attachment_upload_errors.append(
+                            _attachment_upload_error(
+                                provider="gmail",
+                                provider_message_id=str(mid),
+                                filename=str(filename),
+                                content_type=str(mime_type),
+                                exc=exc,
+                            )
+                        )
+                        continue
                     attachments.append(
                         {
                             "filename": str(filename),
@@ -1110,6 +1154,7 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
                         "snippet": snippet,
                         "received_at": msg.get("internalDate"),
                         "attachments": attachments,
+                        "attachment_upload_errors": attachment_upload_errors,
                     }
                 )
         else:
@@ -1146,6 +1191,7 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
                     params={"$expand": "attachments"},
                 )
                 attachments: list[dict[str, Any]] = []
+                attachment_upload_errors: list[dict[str, Any]] = []
                 for a in msg.get("attachments") or []:
                     if a.get("@odata.type") != "#microsoft.graph.fileAttachment":
                         continue
@@ -1157,14 +1203,26 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
                     if not content_b64:
                         continue
                     blob = base64.b64decode(str(content_b64).encode("utf-8"))
-                    upload = await _backend_upload_file(
-                        business_profile_id=body.business_profile_id,
-                        provider="outlook",
-                        filename=str(filename),
-                        content_type=str(mime_type),
-                        data=blob,
-                        metadata={"message_id": str(mid), "subject": subject, "search_query": body.query or ""},
-                    )
+                    try:
+                        upload = await _backend_upload_file(
+                            business_profile_id=body.business_profile_id,
+                            provider="outlook",
+                            filename=str(filename),
+                            content_type=str(mime_type),
+                            data=blob,
+                            metadata={"message_id": str(mid), "subject": subject, "search_query": body.query or ""},
+                        )
+                    except Exception as exc:
+                        attachment_upload_errors.append(
+                            _attachment_upload_error(
+                                provider="outlook",
+                                provider_message_id=str(mid),
+                                filename=str(filename),
+                                content_type=str(mime_type),
+                                exc=exc,
+                            )
+                        )
+                        continue
                     attachments.append(
                         {
                             "filename": str(filename),
@@ -1183,6 +1241,7 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
                         "snippet": snippet,
                         "received_at": item.get("receivedDateTime"),
                         "attachments": attachments,
+                        "attachment_upload_errors": attachment_upload_errors,
                     }
                 )
 
