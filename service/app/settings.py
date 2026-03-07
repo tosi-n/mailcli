@@ -18,9 +18,13 @@ class Settings(BaseSettings):
     MAILCLI_TOKEN_ENCRYPTION_KEY: str
 
     # DB
-    # MAILCLI_DATABASE_URL takes priority. If empty, we fall back to DATABASE_URL
-    # so mailcli can share the same Postgres as the backend.
+    # Precedence:
+    # 1. MAILCLI_DATABASE_URL (tool-specific override)
+    # 2. TOOL_DATABASE_URL (shared embedded-tool database)
+    # 3. DATABASE_URL (reuse host/backend database)
+    # 4. local SQLite fallback
     MAILCLI_DATABASE_URL: str = ""
+    TOOL_DATABASE_URL: str = ""
     DATABASE_URL: str = ""
 
     # Stimulir backend
@@ -140,6 +144,9 @@ def _hydrate_from_aws(cfg: Settings) -> Settings:
 def _apply_database_url_fallback(cfg: Settings) -> Settings:
     if cfg.MAILCLI_DATABASE_URL:
         return cfg
+    if cfg.TOOL_DATABASE_URL:
+        logger.info("Defaulting MAILCLI_DATABASE_URL from TOOL_DATABASE_URL")
+        return cfg.model_copy(update={"MAILCLI_DATABASE_URL": cfg.TOOL_DATABASE_URL})
     if cfg.DATABASE_URL:
         logger.info("Defaulting MAILCLI_DATABASE_URL from DATABASE_URL")
         return cfg.model_copy(update={"MAILCLI_DATABASE_URL": cfg.DATABASE_URL})
