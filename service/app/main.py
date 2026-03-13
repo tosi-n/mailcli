@@ -78,6 +78,12 @@ class DisconnectIn(BaseModel):
 class OAuthStatusOut(BaseModel):
     status: str
     connected_email: str | None = None
+    owner_user_id: str | None = None
+    last_error: str | None = None
+    access_token_expires_at: int | None = None
+    refresh_token_expires_at: int | None = None
+    last_refresh_attempt_at: str | None = None
+    last_refresh_succeeded_at: str | None = None
 
 
 class MailSearchIn(BaseModel):
@@ -126,6 +132,69 @@ def _token_expires_at(token: dict[str, Any]) -> int:
     if isinstance(v, str) and v.isdigit():
         return int(v)
     return 0
+
+
+def _refresh_token_expires_at(token: dict[str, Any]) -> int | None:
+    absolute = token.get("refresh_token_expires_at")
+    if isinstance(absolute, (int, float)):
+        return int(absolute)
+    if isinstance(absolute, str) and absolute.isdigit():
+        return int(absolute)
+    relative = token.get("refresh_token_expires_in")
+    if isinstance(relative, str) and relative.isdigit():
+        relative = int(relative)
+    if isinstance(relative, (int, float)) and int(relative) > 0:
+        return int(time.time()) + int(relative)
+    return None
+
+
+def _mail_health_patch(
+    token: dict[str, Any],
+    *,
+    last_refresh_attempt_at: str | None = None,
+    last_refresh_succeeded_at: str | None = None,
+    last_error: str | None = None,
+    last_provider_http_status: int | None = None,
+    oauth_status: str | None = None,
+) -> dict[str, Any]:
+    patch: dict[str, Any] = {
+        "access_token_expires_at": _token_expires_at(token) or None,
+        "refresh_token_expires_at": _refresh_token_expires_at(token),
+    }
+    if last_refresh_attempt_at is not None:
+        patch["last_refresh_attempt_at"] = last_refresh_attempt_at
+    if last_refresh_succeeded_at is not None:
+        patch["last_refresh_succeeded_at"] = last_refresh_succeeded_at
+    if last_error is not None:
+        patch["last_refresh_error"] = last_error
+        patch["last_error"] = last_error
+    if last_provider_http_status is not None:
+        patch["last_provider_http_status"] = int(last_provider_http_status)
+    if oauth_status is not None:
+        patch["oauth_status"] = oauth_status
+    return patch
+
+
+def _mail_requires_reauth(metadata: dict[str, Any] | None) -> bool:
+    meta = dict(metadata or {})
+    oauth_status = str(meta.get("oauth_status") or "").strip().lower()
+    if oauth_status in {"reauth_required", "needs_reauth", "expired", "unauthorized"}:
+        return True
+    error_text = str(meta.get("last_refresh_error") or meta.get("last_error") or "").strip().lower()
+    if not error_text:
+        return False
+    return any(
+        marker in error_text
+        for marker in (
+            "invalid_grant",
+            "invalid_client",
+            "unauthorized",
+            "forbidden",
+            "reauth",
+            "refresh token",
+            "failed to refresh",
+        )
+    )
 
 
 async def _create_oauth_state(
@@ -197,27 +266,77 @@ def _provider_http_error_detail(exc: httpx.HTTPStatusError, provider: str) -> st
     return f"{provider} OAuth exchange failed: {detail}"
 
 
-async def _maybe_refresh_token(provider: str, token: dict[str, Any]) -> dict[str, Any]:
+async def _maybe_refresh_token(
+    db: AsyncSession | None,
+    conn: MailConnection | None,
+    provider: str,
+    token: dict[str, Any],
+) -> dict[str, Any]:
     # Refresh if within 60 seconds of expiry.
     if _token_expires_at(token) > int(time.time()) + 60:
         return token
     refresh = token.get("refresh_token")
     if not refresh:
         return token
-    if provider == "gmail":
-        return await refresh_gmail_token(str(refresh))
-    if provider == "outlook":
-        return await refresh_outlook_token(str(refresh))
-    return token
-
-
-async def _load_connection(db: AsyncSession, business_profile_id: UUID, provider: str) -> MailConnection | None:
-    res = await db.execute(
-        select(MailConnection).where(
-            MailConnection.business_profile_id == str(business_profile_id),
-            MailConnection.provider == provider,
+    attempted_at = dt.datetime.now(dt.UTC).isoformat()
+    try:
+        if provider == "gmail":
+            refreshed = await refresh_gmail_token(str(refresh))
+        elif provider == "outlook":
+            refreshed = await refresh_outlook_token(str(refresh))
+        else:
+            refreshed = token
+    except Exception as exc:
+        if db is not None and conn is not None:
+            metadata = dict(conn.metadata_json or {})
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None else None
+            metadata.update(
+                _mail_health_patch(
+                    token,
+                    last_refresh_attempt_at=attempted_at,
+                    last_error=str(exc),
+                    last_provider_http_status=status_code,
+                    oauth_status="reauth_required",
+                )
+            )
+            conn.metadata_json = metadata
+            conn.updated_at = dt.datetime.now(dt.UTC)
+            await db.commit()
+            await db.refresh(conn)
+        raise
+    if db is not None and conn is not None:
+        metadata = dict(conn.metadata_json or {})
+        metadata.update(
+            _mail_health_patch(
+                refreshed,
+                last_refresh_attempt_at=attempted_at,
+                last_refresh_succeeded_at=dt.datetime.now(dt.UTC).isoformat(),
+                last_error="",
+                last_provider_http_status=200,
+                oauth_status="connected",
+            )
         )
+        conn.token_encrypted = _cipher().encrypt_json(refreshed)
+        conn.metadata_json = metadata
+        conn.updated_at = dt.datetime.now(dt.UTC)
+        await db.commit()
+        await db.refresh(conn)
+    return refreshed
+
+
+async def _load_connection(
+    db: AsyncSession,
+    business_profile_id: UUID,
+    provider: str,
+    user_id: UUID | None = None,
+) -> MailConnection | None:
+    query = select(MailConnection).where(
+        MailConnection.business_profile_id == str(business_profile_id),
+        MailConnection.provider == provider,
     )
+    if user_id is not None:
+        query = query.where(MailConnection.user_id == str(user_id))
+    res = await db.execute(query)
     return res.scalars().first()
 
 
@@ -234,9 +353,10 @@ async def _upsert_connection(
     cipher = _cipher()
     enc = cipher.encrypt_json(token)
     now = dt.datetime.now(dt.UTC)
-    existing = await _load_connection(db, business_profile_id, provider)
+    existing = await _load_connection(db, business_profile_id, provider, user_id)
     if existing:
         meta = dict(existing.metadata_json or {})
+        meta.update(_mail_health_patch(token, oauth_status="connected"))
         if metadata_patch:
             meta.update(metadata_patch)
         await db.execute(
@@ -260,7 +380,7 @@ async def _upsert_connection(
         provider=provider,
         token_encrypted=enc,
         connected_email=connected_email,
-        metadata_json=metadata_patch or {},
+        metadata_json=({} | _mail_health_patch(token, oauth_status="connected") | (metadata_patch or {})),
         created_at=now,
         updated_at=now,
     )
@@ -270,12 +390,15 @@ async def _upsert_connection(
     return conn
 
 
-async def _delete_connection(db: AsyncSession, business_profile_id: UUID, provider: str) -> None:
+async def _delete_connection(db: AsyncSession, business_profile_id: UUID, provider: str, user_id: UUID | None = None) -> None:
+    conditions = [
+        MailConnection.business_profile_id == str(business_profile_id),
+        MailConnection.provider == provider,
+    ]
+    if user_id is not None:
+        conditions.append(MailConnection.user_id == str(user_id))
     await db.execute(
-        delete(MailConnection).where(
-            MailConnection.business_profile_id == str(business_profile_id),
-            MailConnection.provider == provider,
-        )
+        delete(MailConnection).where(*conditions)
     )
     await db.commit()
 
@@ -494,14 +617,25 @@ async def outlook_exchange(body: ExchangeIn) -> dict[str, Any]:
     dependencies=[Depends(require_internal_api_key)],
     response_model=OAuthStatusOut,
 )
-async def oauth_status(provider: str, business_profile_id: UUID) -> OAuthStatusOut:
+async def oauth_status(provider: str, business_profile_id: UUID, user_id: UUID | None = None) -> OAuthStatusOut:
     if provider not in {"gmail", "outlook"}:
         raise HTTPException(status_code=400, detail="Unsupported provider")
     async for db in session_scope():
-        conn = await _load_connection(db, business_profile_id, provider)
+        conn = await _load_connection(db, business_profile_id, provider, user_id)
         if not conn:
             return OAuthStatusOut(status="not_connected", connected_email=None)
-        return OAuthStatusOut(status="connected", connected_email=conn.connected_email)
+        metadata = dict(conn.metadata_json or {})
+        status_value = "reauth_required" if _mail_requires_reauth(metadata) else "connected"
+        return OAuthStatusOut(
+            status=status_value,
+            connected_email=conn.connected_email,
+            owner_user_id=str(conn.user_id),
+            last_error=(str(metadata.get("last_error") or "").strip() or None),
+            access_token_expires_at=metadata.get("access_token_expires_at"),
+            refresh_token_expires_at=metadata.get("refresh_token_expires_at"),
+            last_refresh_attempt_at=metadata.get("last_refresh_attempt_at"),
+            last_refresh_succeeded_at=metadata.get("last_refresh_succeeded_at"),
+        )
 
 
 @app.post("/internal/oauth/{provider}/disconnect", dependencies=[Depends(require_internal_api_key)])
@@ -509,7 +643,7 @@ async def oauth_disconnect(provider: str, body: DisconnectIn) -> dict[str, Any]:
     if provider not in {"gmail", "outlook"}:
         raise HTTPException(status_code=400, detail="Unsupported provider")
     async for db in session_scope():
-        await _delete_connection(db, body.business_profile_id, provider)
+        await _delete_connection(db, body.business_profile_id, provider, body.user_id)
         return {"disconnected": True}
 
 
@@ -539,7 +673,7 @@ async def webhook_gmail(request: Request) -> dict[str, Any]:
             return {"processed": 0, "reason": "no_connection_for_email"}
 
         token = _decrypt_connection_token(conn.token_encrypted, "gmail")
-        token = await _maybe_refresh_token("gmail", token)
+        token = await _maybe_refresh_token(db, conn, "gmail", token)
 
         prev_history = (conn.metadata_json or {}).get("gmail_history_id")
         if not prev_history:
@@ -654,7 +788,7 @@ async def webhook_outlook(
             return {"processed": 0, "reason": "no_connection"}
 
         token = _decrypt_connection_token(conn.token_encrypted, "outlook")
-        token = await _maybe_refresh_token("outlook", token)
+        token = await _maybe_refresh_token(db, conn, "outlook", token)
 
         notifications = payload.get("value") or []
         out: list[dict[str, Any]] = []
@@ -995,7 +1129,7 @@ async def mail_send(body: MailSendIn) -> MailSendOut:
             had_connection = True
 
             token = _decrypt_connection_token(conn.token_encrypted, provider)
-            token = await _maybe_refresh_token(provider, token)
+            token = await _maybe_refresh_token(db, conn, provider, token)
 
             try:
                 if provider == "gmail":
@@ -1061,7 +1195,7 @@ async def mail_search(body: MailSearchIn) -> dict[str, Any]:
             }
 
         token = _decrypt_connection_token(conn.token_encrypted, provider)
-        token = await _maybe_refresh_token(provider, token)
+        token = await _maybe_refresh_token(db, conn, provider, token)
 
         matches: list[dict[str, Any]] = []
 

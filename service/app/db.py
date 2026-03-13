@@ -4,8 +4,8 @@ import datetime as dt
 import uuid
 from typing import Any, AsyncIterator, Optional
 
-from sqlalchemy import JSON, DateTime, String, Text, UniqueConstraint
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import JSON, DateTime, String, Text, UniqueConstraint, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.settings import settings
@@ -28,7 +28,7 @@ class OAuthState(Base):
 class MailConnection(Base):
     __tablename__ = "mail_connections"
     __table_args__ = (
-        UniqueConstraint("business_profile_id", "provider", name="uq_mail_connection_bp_provider"),
+        UniqueConstraint("business_profile_id", "provider", "user_id", name="uq_mail_connection_bp_provider_user"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -64,6 +64,38 @@ async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_mail_connections_user_scope(conn)
+
+
+async def _ensure_mail_connections_user_scope(conn: AsyncConnection) -> None:
+    dialect_name = conn.dialect.name.lower()
+    if dialect_name == "postgresql":
+        await conn.execute(
+            text(
+                "ALTER TABLE mail_connections "
+                "DROP CONSTRAINT IF EXISTS uq_mail_connection_bp_provider"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE mail_connections "
+                "DROP CONSTRAINT IF EXISTS uq_mail_connection_bp_provider_user"
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    ALTER TABLE mail_connections
+                    ADD CONSTRAINT uq_mail_connection_bp_provider_user
+                    UNIQUE (business_profile_id, provider, user_id);
+                EXCEPTION
+                    WHEN duplicate_object THEN NULL;
+                END $$;
+                """
+            )
+        )
 
 
 async def session_scope() -> AsyncIterator[AsyncSession]:
