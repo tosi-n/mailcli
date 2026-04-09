@@ -18,6 +18,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r service/requirements.txt
+
       - name: Compile
         run: |
           python -m compileall -q service/app
+
+      - name: Gmail OAuth unit tests
+        env:
+          MAILCLI_TOKEN_ENCRYPTION_KEY: iu6SKclrmwsvh1jwTF-QYK4ahkFGu9lKe-_RpHhm3E4=
+          BACKEND_PUBLIC_ORIGIN: https://api.stimulir.test
+          GMAIL_CLIENT_ID: gmail-client-id
+          GMAIL_CLIENT_SECRET: gmail-client-secret
+        run: |
+          PYTHONPATH=service python -m unittest discover -s service/tests -p "test_*.py"

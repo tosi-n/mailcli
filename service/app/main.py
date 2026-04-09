@@ -243,7 +243,28 @@ def _parse_callback_url(callback_url: str) -> dict[str, str]:
     realm_id = (q.get("realmId") or [None])[0]
     if realm_id:
         out["realmId"] = str(realm_id)
+    scope = (q.get("scope") or [None])[0]
+    if scope:
+        out["scope"] = str(scope)
     return out
+
+
+def _scope_set(raw_scope: str | None) -> set[str]:
+    return {part.strip() for part in str(raw_scope or "").split() if part.strip()}
+
+
+def _missing_gmail_scopes(
+    *,
+    callback_scope: str | None,
+    token: dict[str, Any],
+) -> list[str]:
+    required = _scope_set(settings.GMAIL_SCOPE)
+    if not required:
+        return []
+    granted = _scope_set(callback_scope)
+    if not granted:
+        granted = _scope_set(token.get("scope"))
+    return sorted(required - granted)
 
 
 def _provider_http_error_detail(exc: httpx.HTTPStatusError, provider: str) -> str:
@@ -531,8 +552,26 @@ async def gmail_exchange(body: ExchangeIn) -> dict[str, Any]:
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=400, detail=_provider_http_error_detail(exc, "gmail")) from exc
 
+        missing_scopes = _missing_gmail_scopes(callback_scope=bits.get("scope"), token=token)
+        if missing_scopes:
+            logger.warning(
+                "gmail oauth exchange missing required scopes; granted=%s required=%s",
+                sorted(_scope_set(bits.get("scope")) or _scope_set(token.get("scope"))),
+                sorted(_scope_set(settings.GMAIL_SCOPE)),
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "gmail OAuth exchange failed: missing required Gmail scopes "
+                    f"({', '.join(missing_scopes)}). Reconnect Gmail and grant requested access."
+                ),
+            )
+
         # Capture connected email and initialize history id.
-        email_profile = await gmail_api_get("/gmail/v1/users/me/profile", token)
+        try:
+            email_profile = await gmail_api_get("/gmail/v1/users/me/profile", token)
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=400, detail=_provider_http_error_detail(exc, "gmail")) from exc
         connected_email = email_profile.get("emailAddress")
 
         history_id: str | None = None

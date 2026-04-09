@@ -50,7 +50,6 @@ def build_gmail_authorize_url(state: str) -> str:
         "scope": settings.GMAIL_SCOPE,
         "access_type": "offline",
         "prompt": "consent",
-        "include_granted_scopes": "true",
         "state": state,
     }
     return f"{settings.GMAIL_AUTHORIZATION_URL}?{urllib.parse.urlencode(params)}"
